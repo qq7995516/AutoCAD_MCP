@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "autocad-2008": {
+      "command": "F:/CSharp_Demo/AutoCAD_MCP/src/AutoCadMcp/bin/Release/net10.0-windows/win-x86/AutoCadMcp.exe"
+    }
+  }
+}
