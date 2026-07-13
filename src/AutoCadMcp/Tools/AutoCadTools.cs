@@ -8,17 +8,18 @@ namespace AutoCadMcp.Tools;
 [McpServerToolType]
 public sealed class AutoCadTools(AutoCadSession session)
 {
-    [McpServerTool(Name = "cad_connect"), Description("Connect to AutoCAD 2008. ALWAYS detects running acad process first: if running → attach COM only (no second instance); if not running → ProgID create or launch cached acad.exe then attach.")]
+    [McpServerTool(Name = "cad_connect"), Description("Connect to AutoCAD 2008. Detects running acad first: bind by optional pid (HWND/NativeOM); if one process and no pid → bind it; if multiple and no pid → error listing PIDs. Never CreateInstance while a process is already running.")]
     public Task<string> Connect(
         [Description("Whether AutoCAD window should be visible")] bool visible = true,
-        [Description("Optional full path to acad.exe; only used when no CAD process is running")] string? acadExePath = null)
-        => session.ConnectAsync(visible, acadExePath);
+        [Description("Optional full path to acad.exe; only used when no CAD process is running")] string? acadExePath = null,
+        [Description("Optional AutoCAD process PID to bind. Required when multiple acad instances are running. Use cad_discover_process to list PIDs.")] int? pid = null)
+        => session.ConnectAsync(visible, acadExePath, pid);
 
-    [McpServerTool(Name = "cad_discover_process"), Description("Detect whether AutoCAD is running. Returns PID, exe path, and folder; caches path for later launch. Prefer calling this (or cad_status) before drawing.")]
+    [McpServerTool(Name = "cad_discover_process"), Description("Detect running AutoCAD processes (PID, exe, title). Marks the session-bound PID. Prefer calling this before drawing when multiple CAD windows may be open.")]
     public Task<string> DiscoverProcess()
         => session.DiscoverProcessAsync();
 
-    [McpServerTool(Name = "cad_status"), Description("Check running acad process first, then COM connection status. Does not start CAD.")]
+    [McpServerTool(Name = "cad_status"), Description("Check running acad processes, bound PID, and COM connection status. Does not start CAD.")]
     public Task<string> Status()
         => session.GetStatusAsync();
 

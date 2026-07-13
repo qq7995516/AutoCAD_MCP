@@ -8,15 +8,24 @@ namespace AutoCadMcp.Cad;
 
 /// <summary>
 /// Late-bound COM session for AutoCAD 2008 (ProgID AutoCAD.Application.17).
-/// Also supports portable installs: launch acad.exe by path, then attach via ROT.
+/// Binds a specific process by PID via HWND/NativeOM when multiple instances run.
+/// Also supports portable installs: launch acad.exe by path, then attach.
 /// </summary>
 public sealed class AutoCadSession : IDisposable
 {
-    // AutoCAD 2008 = version 17.0
+    // Prefer the registered 2008 ProgID first; generic may be missing on some installs.
     private static readonly string[] ProgIds =
     [
-        "AutoCAD.Application.17",
+        "AutoCAD.Application.17", // 2008
         "AutoCAD.Application",
+        "AutoCAD.Application.25", // 2025
+        "AutoCAD.Application.24", // 2024
+        "AutoCAD.Application.23", // 2019-2021 family varies
+        "AutoCAD.Application.22",
+        "AutoCAD.Application.21",
+        "AutoCAD.Application.20",
+        "AutoCAD.Application.19",
+        "AutoCAD.Application.18", // 2010
     ];
 
     private readonly StaDispatcher _sta;
@@ -25,6 +34,7 @@ public sealed class AutoCadSession : IDisposable
     private object? _app;
     private bool _startedByUs;
     private string? _discoveredExePath;
+    private int? _boundPid;
 
     public AutoCadSession(StaDispatcher sta, IOptions<AutoCadOptions> options, ILogger<AutoCadSession> logger)
     {
@@ -33,8 +43,8 @@ public sealed class AutoCadSession : IDisposable
         _options = options.Value;
     }
 
-    public Task<string> ConnectAsync(bool visible = true, string? acadExePath = null, CancellationToken cancellationToken = default)
-        => _sta.InvokeAsync(() => ConnectCore(visible, acadExePath), cancellationToken);
+    public Task<string> ConnectAsync(bool visible = true, string? acadExePath = null, int? pid = null, CancellationToken cancellationToken = default)
+        => _sta.InvokeAsync(() => ConnectCore(visible, acadExePath, pid), cancellationToken);
 
     public Task<string> DiscoverProcessAsync(CancellationToken cancellationToken = default)
         => _sta.InvokeAsync(DiscoverProcessCore, cancellationToken);
@@ -43,59 +53,81 @@ public sealed class AutoCadSession : IDisposable
         => _sta.InvokeAsync(GetStatusCore, cancellationToken);
 
     public Task<string> NewDrawingAsync(CancellationToken cancellationToken = default)
-        => _sta.InvokeAsync(NewDrawingCore, cancellationToken);
+        => _sta.InvokeAsync(() => GuardCom(NewDrawingCore), cancellationToken);
 
     public Task<string> OpenDrawingAsync(string path, CancellationToken cancellationToken = default)
-        => _sta.InvokeAsync(() => OpenDrawingCore(path), cancellationToken);
+        => _sta.InvokeAsync(() => GuardCom(() => OpenDrawingCore(path)), cancellationToken);
 
     public Task<string> SaveDrawingAsync(string? path, CancellationToken cancellationToken = default)
-        => _sta.InvokeAsync(() => SaveDrawingCore(path), cancellationToken);
+        => _sta.InvokeAsync(() => GuardCom(() => SaveDrawingCore(path)), cancellationToken);
 
     public Task<string> DrawLineAsync(double x1, double y1, double x2, double y2, string? layer, CancellationToken cancellationToken = default)
-        => _sta.InvokeAsync(() => DrawLineCore(x1, y1, x2, y2, layer), cancellationToken);
+        => _sta.InvokeAsync(() => GuardCom(() => DrawLineCore(x1, y1, x2, y2, layer)), cancellationToken);
 
     public Task<string> DrawCircleAsync(double cx, double cy, double radius, string? layer, CancellationToken cancellationToken = default)
-        => _sta.InvokeAsync(() => DrawCircleCore(cx, cy, radius, layer), cancellationToken);
+        => _sta.InvokeAsync(() => GuardCom(() => DrawCircleCore(cx, cy, radius, layer)), cancellationToken);
 
     public Task<string> DrawArcAsync(double cx, double cy, double radius, double startAngleDeg, double endAngleDeg, string? layer, CancellationToken cancellationToken = default)
-        => _sta.InvokeAsync(() => DrawArcCore(cx, cy, radius, startAngleDeg, endAngleDeg, layer), cancellationToken);
+        => _sta.InvokeAsync(() => GuardCom(() => DrawArcCore(cx, cy, radius, startAngleDeg, endAngleDeg, layer)), cancellationToken);
 
     public Task<string> DrawRectangleAsync(double x1, double y1, double x2, double y2, string? layer, CancellationToken cancellationToken = default)
-        => _sta.InvokeAsync(() => DrawRectangleCore(x1, y1, x2, y2, layer), cancellationToken);
+        => _sta.InvokeAsync(() => GuardCom(() => DrawRectangleCore(x1, y1, x2, y2, layer)), cancellationToken);
 
     public Task<string> DrawPolylineAsync(IReadOnlyList<(double X, double Y)> points, bool closed, string? layer, CancellationToken cancellationToken = default)
-        => _sta.InvokeAsync(() => DrawPolylineCore(points, closed, layer), cancellationToken);
+        => _sta.InvokeAsync(() => GuardCom(() => DrawPolylineCore(points, closed, layer)), cancellationToken);
 
     public Task<string> DrawTextAsync(double x, double y, double height, string text, double rotationDeg, string? layer, CancellationToken cancellationToken = default)
-        => _sta.InvokeAsync(() => DrawTextCore(x, y, height, text, rotationDeg, layer), cancellationToken);
+        => _sta.InvokeAsync(() => GuardCom(() => DrawTextCore(x, y, height, text, rotationDeg, layer)), cancellationToken);
 
     public Task<string> CreateLayerAsync(string name, short colorIndex, CancellationToken cancellationToken = default)
-        => _sta.InvokeAsync(() => CreateLayerCore(name, colorIndex), cancellationToken);
+        => _sta.InvokeAsync(() => GuardCom(() => CreateLayerCore(name, colorIndex)), cancellationToken);
 
     public Task<string> SetCurrentLayerAsync(string name, CancellationToken cancellationToken = default)
-        => _sta.InvokeAsync(() => SetCurrentLayerCore(name), cancellationToken);
+        => _sta.InvokeAsync(() => GuardCom(() => SetCurrentLayerCore(name)), cancellationToken);
 
     public Task<string> ZoomExtentsAsync(CancellationToken cancellationToken = default)
-        => _sta.InvokeAsync(ZoomExtentsCore, cancellationToken);
+        => _sta.InvokeAsync(() => GuardCom(ZoomExtentsCore), cancellationToken);
 
     public Task<string> SendCommandAsync(string command, CancellationToken cancellationToken = default)
-        => _sta.InvokeAsync(() => SendCommandCore(command), cancellationToken);
+        => _sta.InvokeAsync(() => GuardCom(() => SendCommandCore(command)), cancellationToken);
 
     public Task<string> ListEntitiesAsync(int maxCount, CancellationToken cancellationToken = default)
-        => _sta.InvokeAsync(() => ListEntitiesCore(maxCount), cancellationToken);
+        => _sta.InvokeAsync(() => GuardCom(() => ListEntitiesCore(maxCount)), cancellationToken);
 
     public Task<string> EraseByHandleAsync(string handle, CancellationToken cancellationToken = default)
-        => _sta.InvokeAsync(() => EraseByHandleCore(handle), cancellationToken);
+        => _sta.InvokeAsync(() => GuardCom(() => EraseByHandleCore(handle)), cancellationToken);
 
-    private string ConnectCore(bool visible, string? acadExePath)
+    private string GuardCom(Func<string> action)
     {
-        if (_app is not null && IsAlive(_app))
+        try
+        {
+            return action();
+        }
+        catch (InvalidOperationException)
+        {
+            throw;
+        }
+        catch (Exception ex) when (ComHelper.IsBusyComException(ex) || ComHelper.UnwrapComException(ex) is not null)
+        {
+            throw new InvalidOperationException($"{DiagnoseBoundPid()} Detail: {ex.Message}", ex);
+        }
+    }
+
+    private string ConnectCore(bool visible, string? acadExePath, int? requestedPid)
+    {
+        if (_app is not null && IsAlive(_app) && MatchesBoundPid(requestedPid))
         {
             ComHelper.SetProperty(_app, "Visible", visible);
             return FormatAppInfo("Already connected");
         }
 
-        // 0) Always detect running CAD process first (green/official).
+        // Drop stale RCW before rebinding.
+        if (_app is not null)
+        {
+            ComHelper.Release(_app);
+            _app = null;
+        }
+
         var running = ListRunningAcadProcesses();
         CacheExeFromProcesses(running);
         if (!string.IsNullOrWhiteSpace(acadExePath) && File.Exists(acadExePath.Trim().Trim('"')))
@@ -106,40 +138,58 @@ public sealed class AutoCadSession : IDisposable
         object? app = null;
         string? usedProgId = null;
         var connectMode = "unknown";
-        var processSummary = running.Count == 0
-            ? "No running acad process."
-            : string.Join("; ", running.Select(p =>
-                $"PID={p.Pid} Exe={p.ExePath ?? "(denied)"} Dir={p.Directory ?? "?"}"));
+        var processSummary = FormatProcessSummary(running);
 
         _logger.LogInformation("CAD process check: {Summary}", processSummary);
 
-        if (running.Count > 0)
+        var targetPid = ResolveTargetPid(running, requestedPid);
+        if (targetPid is not null)
         {
-            // 1) CAD is already running → only attach, do not start another instance.
-            (app, usedProgId) = TryGetActiveApp();
-            if (app is null)
-            {
-                // Process up but COM not ready yet (cold UI) — brief wait.
-                (app, usedProgId) = WaitForActiveApp(Math.Min(15, _options.LaunchTimeoutSeconds));
-            }
-
+            app = WaitForAppFromPid(targetPid.Value, Math.Min(15, _options.LaunchTimeoutSeconds));
             if (app is not null)
             {
-                connectMode = "attach-running-process";
+                connectMode = "attach-by-pid";
                 _startedByUs = false;
-                _logger.LogInformation("Attached to running AutoCAD process via {ProgId}", usedProgId);
+                _boundPid = targetPid;
+                usedProgId = "(HWND/NativeOM)";
+                _logger.LogInformation("Attached to AutoCAD PID={Pid} via HWND/NativeOM", targetPid);
             }
             else
             {
-                throw new InvalidOperationException(
-                    "Detected running AutoCAD process but COM attach failed. " +
-                    $"Processes: {processSummary}. " +
-                    "The build may lack Automation/COM, or you need to wait until CAD fully finishes starting, then retry cad_connect.");
+                // Single-instance fallback: ROT GetActiveObject (never CreateInstance while process exists).
+                if (running.Count == 1)
+                {
+                    (app, usedProgId) = TryGetActiveApp();
+                    if (app is null)
+                    {
+                        (app, usedProgId) = WaitForActiveApp(Math.Min(15, _options.LaunchTimeoutSeconds));
+                    }
+
+                    if (app is not null)
+                    {
+                        connectMode = "attach-running-rot";
+                        _startedByUs = false;
+                        _boundPid = running[0].Pid;
+                        _logger.LogInformation(
+                            "HWND attach failed; attached via ROT {ProgId} to PID={Pid}",
+                            usedProgId,
+                            _boundPid);
+                    }
+                }
+
+                if (app is null)
+                {
+                    throw new InvalidOperationException(
+                        $"Detected AutoCAD PID={targetPid} but COM attach failed. " +
+                        $"Processes: {processSummary}. " +
+                        "Wait until CAD finishes starting, then retry cad_connect. " +
+                        "Do not use CreateInstance while a process is already running.");
+                }
             }
         }
         else
         {
-            // 2) No process → try ProgID (official install).
+            // No process → try ProgID (official install), then launch exe.
             foreach (var progId in ProgIds)
             {
                 try
@@ -157,7 +207,6 @@ public sealed class AutoCadSession : IDisposable
                 }
             }
 
-            // 3) Still nothing → launch acad.exe from cached/env/arg path, then attach.
             if (app is null)
             {
                 var exePath = ResolveAcadExePath(acadExePath);
@@ -172,16 +221,41 @@ public sealed class AutoCadSession : IDisposable
                 _logger.LogInformation("No process found; launching acad.exe: {Path}", exePath);
                 LaunchAcadExe(exePath);
                 _startedByUs = true;
-                (app, usedProgId) = WaitForActiveApp(_options.LaunchTimeoutSeconds);
+                running = ListRunningAcadProcesses();
+                CacheExeFromProcesses(running);
+                if (running.Count == 0)
+                {
+                    throw new InvalidOperationException($"Started '{exePath}' but no acad process appeared.");
+                }
+
+                var launchedPid = running.OrderByDescending(p => p.Pid).First().Pid;
+                app = WaitForAppFromPid(launchedPid, _options.LaunchTimeoutSeconds);
+                if (app is null)
+                {
+                    (app, usedProgId) = WaitForActiveApp(_options.LaunchTimeoutSeconds);
+                }
+
                 if (app is not null)
                 {
                     connectMode = "exe-launch-attach";
-                    CacheExeFromProcesses(ListRunningAcadProcesses());
+                    _boundPid = launchedPid;
+                    usedProgId ??= "(HWND/NativeOM)";
                 }
                 else
                 {
                     throw new InvalidOperationException(
                         $"Started '{exePath}' but COM never appeared. This green build likely has no Automation support.");
+                }
+            }
+            else
+            {
+                // ProgID create started a process — bind its PID once visible.
+                Thread.Sleep(1500);
+                running = ListRunningAcadProcesses();
+                CacheExeFromProcesses(running);
+                if (running.Count > 0)
+                {
+                    _boundPid = running.OrderByDescending(p => p.Pid).First().Pid;
                 }
             }
         }
@@ -203,9 +277,131 @@ public sealed class AutoCadSession : IDisposable
         }
 
         EnsureDocument();
+
+        if (_boundPid is null or 0)
+        {
+            _boundPid = TryReadPidFromApp(_app);
+            if (_boundPid is null or 0)
+            {
+                var still = ListRunningAcadProcesses();
+                _boundPid = still.Count >= 1 ? still[0].Pid : null;
+            }
+        }
+
         var exeInfo = _discoveredExePath is not null ? $", Exe={_discoveredExePath}" : "";
-        return $"ProcessCheck: {processSummary}. " + FormatAppInfo($"Connected ({connectMode}) via {usedProgId}") + exeInfo;
+        return $"ProcessCheck: {processSummary}. " +
+               FormatAppInfo($"Connected ({connectMode}) via {usedProgId}") +
+               exeInfo;
     }
+
+    private int? ResolveTargetPid(IReadOnlyList<AcadProcessInfo> running, int? requestedPid)
+    {
+        if (running.Count == 0)
+        {
+            return null;
+        }
+
+        var preferred = requestedPid ?? _boundPid;
+        if (preferred is int pid)
+        {
+            if (running.Any(p => p.Pid == pid))
+            {
+                return pid;
+            }
+
+            throw new InvalidOperationException(
+                $"Requested PID={pid} is not a running acad process. " +
+                $"Running: {FormatProcessSummary(running)}. Call cad_discover_process and pass a valid pid.");
+        }
+
+        if (running.Count == 1)
+        {
+            return running[0].Pid;
+        }
+
+        throw new InvalidOperationException(
+            $"Multiple acad processes running ({running.Count}). Pass pid=... to cad_connect. " +
+            $"Discovered: {FormatProcessSummary(running)}");
+    }
+
+    private bool MatchesBoundPid(int? requestedPid)
+    {
+        if (requestedPid is int req)
+        {
+            return _boundPid == req;
+        }
+
+        return true;
+    }
+
+    private static string FormatProcessSummary(IReadOnlyList<AcadProcessInfo> running)
+        => running.Count == 0
+            ? "No running acad process."
+            : string.Join("; ", running.Select(p =>
+                $"PID={p.Pid} Exe={p.ExePath ?? "(denied)"} Dir={p.Directory ?? "?"} Title={p.WindowTitle}"));
+
+    private object? WaitForAppFromPid(int pid, int timeoutSeconds)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(Math.Clamp(timeoutSeconds, 5, 300));
+        while (DateTime.UtcNow < deadline)
+        {
+            if (!IsProcessAlive(pid))
+            {
+                return null;
+            }
+
+            var app = ComHelper.GetApplicationFromProcess(pid);
+            if (app is not null)
+            {
+                return app;
+            }
+
+            Thread.Sleep(500);
+        }
+
+        return null;
+    }
+
+    private static bool IsProcessAlive(int pid)
+    {
+        try
+        {
+            using var proc = Process.GetProcessById(pid);
+            return !proc.HasExited;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static int? TryReadPidFromApp(object app)
+    {
+        try
+        {
+            var hwndObj = ComHelper.GetProperty(app, "HWND");
+            if (hwndObj is null)
+            {
+                return null;
+            }
+
+            var hwnd = new IntPtr(Convert.ToInt64(hwndObj));
+            if (hwnd == IntPtr.Zero)
+            {
+                return null;
+            }
+
+            _ = GetWindowThreadProcessId(hwnd, out var pid);
+            return pid == 0 ? null : (int)pid;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
 
     private void CacheExeFromProcesses(IReadOnlyList<AcadProcessInfo> running)
     {
@@ -232,8 +428,18 @@ public sealed class AutoCadSession : IDisposable
         var lines = new List<string> { $"Found {infos.Count} acad process(es):" };
         foreach (var info in infos)
         {
+            var bound = _boundPid == info.Pid ? " [BOUND]" : "";
             lines.Add(
-                $"PID={info.Pid}, Exe={info.ExePath ?? "(access denied)"}, Dir={info.Directory ?? "?"}, Title={info.WindowTitle}");
+                $"PID={info.Pid}{bound}, Exe={info.ExePath ?? "(access denied)"}, Dir={info.Directory ?? "?"}, Title={info.WindowTitle}");
+        }
+
+        if (_boundPid is int boundPid)
+        {
+            lines.Add($"Session bound PID: {boundPid}" + (IsProcessAlive(boundPid) ? " (alive)" : " (exited)"));
+        }
+        else
+        {
+            lines.Add("Session bound PID: (none). If multiple processes, call cad_connect with pid=...");
         }
 
         if (_discoveredExePath is not null)
@@ -398,18 +604,23 @@ public sealed class AutoCadSession : IDisposable
         var processLine = running.Count == 0
             ? "Process: none"
             : "Process: " + string.Join("; ", running.Select(p =>
-                $"PID={p.Pid} Exe={p.ExePath ?? "(denied)"}"));
+                $"PID={p.Pid}{( _boundPid == p.Pid ? "*" : "")} Exe={p.ExePath ?? "(denied)"}"));
+
+        var boundLine = _boundPid is int bp
+            ? $"BoundPid={bp} ({(IsProcessAlive(bp) ? "alive" : "exited")})"
+            : "BoundPid=(none)";
 
         if (_app is null || !IsAlive(_app))
         {
-            return $"{processLine}. COM: not connected. Call cad_connect after CAD is running.";
+            return $"{processLine}. {boundLine}. COM: not connected. Call cad_connect after CAD is running" +
+                   (running.Count > 1 ? " (pass pid=... when multiple)." : ".");
         }
 
         var exe = _discoveredExePath ?? TryGetExePathFromRunningProcesses();
         var baseInfo = FormatAppInfo("OK");
         return exe is null
-            ? $"{processLine}. {baseInfo}"
-            : $"{processLine}. {baseInfo}, Exe={exe}, Dir={Path.GetDirectoryName(exe)}";
+            ? $"{processLine}. {boundLine}. {baseInfo}"
+            : $"{processLine}. {boundLine}. {baseInfo}, Exe={exe}, Dir={Path.GetDirectoryName(exe)}";
     }
 
     private string NewDrawingCore()
@@ -790,10 +1001,58 @@ public sealed class AutoCadSession : IDisposable
 
     private void EnsureApp()
     {
-        if (_app is null || !IsAlive(_app))
+        if (_app is not null && IsAlive(_app))
         {
-            ConnectCore(visible: true, acadExePath: null);
+            if (_boundPid is int pid && !IsProcessAlive(pid))
+            {
+                ComHelper.Release(_app);
+                _app = null;
+                var dead = _boundPid;
+                _boundPid = null;
+                throw new InvalidOperationException(
+                    $"COM failed; bound PID={dead} not found → AutoCAD exited. Call cad_connect again.");
+            }
+
+            return;
         }
+
+        if (_app is not null)
+        {
+            ComHelper.Release(_app);
+            _app = null;
+        }
+
+        if (_boundPid is int bound && !IsProcessAlive(bound))
+        {
+            var dead = _boundPid;
+            _boundPid = null;
+            throw new InvalidOperationException(
+                $"COM failed; bound PID={dead} not found → AutoCAD exited. Call cad_connect again.");
+        }
+
+        try
+        {
+            ConnectCore(visible: true, acadExePath: null, requestedPid: null);
+        }
+        catch (Exception ex)
+        {
+            throw new InvalidOperationException($"{DiagnoseBoundPid()} Reconnect failed: {ex.Message}", ex);
+        }
+    }
+
+    private string DiagnoseBoundPid()
+    {
+        if (_boundPid is not int pid)
+        {
+            return "COM failed; no bound PID.";
+        }
+
+        if (!IsProcessAlive(pid))
+        {
+            return $"COM failed; bound PID={pid} not found → AutoCAD exited.";
+        }
+
+        return $"COM failed; bound PID={pid} still running → likely busy/dialog/command or RCW invalid.";
     }
 
     private void EnsureDocument()
@@ -874,7 +1133,7 @@ public sealed class AutoCadSession : IDisposable
 
     private string FormatAppInfo(string prefix)
     {
-        EnsureApp();
+        // Do not call EnsureApp here — callers already connected; avoids recursion on reconnect.
         var name = ComHelper.GetProperty(_app!, "Name")?.ToString() ?? "AutoCAD";
         var version = ComHelper.GetProperty(_app!, "Version")?.ToString() ?? "?";
         var fullName = ComHelper.GetProperty(_app!, "FullName")?.ToString() ?? "?";
@@ -893,7 +1152,8 @@ public sealed class AutoCadSession : IDisposable
             // No document yet.
         }
 
-        return $"{prefix}. App={name}, Version={version}, Doc={docName}, Path={fullName}, StartedByUs={_startedByUs}";
+        var pidPart = _boundPid is int bp ? $", BoundPid={bp}" : ", BoundPid=(none)";
+        return $"{prefix}. App={name}, Version={version}, Doc={docName}, Path={fullName}, StartedByUs={_startedByUs}{pidPart}";
     }
 
     private static bool IsAlive(object app)
@@ -903,12 +1163,16 @@ public sealed class AutoCadSession : IDisposable
             _ = ComHelper.GetProperty(app, "Name");
             return true;
         }
-        catch (COMException)
+        catch (Exception ex) when (ComHelper.IsBusyComException(ex))
         {
-            return false;
+            // Rejected/busy means the server is still there.
+            return true;
         }
-        catch (InvalidComObjectException)
+        catch (Exception ex) when (
+            ex is InvalidComObjectException
+            || ComHelper.UnwrapComException(ex) is not null)
         {
+            // Late-bound COM failures are often wrapped in TargetInvocationException.
             return false;
         }
     }
@@ -919,22 +1183,11 @@ public sealed class AutoCadSession : IDisposable
         {
             if (_app is not null)
             {
-                // Do not Quit AutoCAD if we attached to an existing instance.
-                if (_startedByUs)
-                {
-                    try
-                    {
-                        // Leave CAD running for the user; only release our RCW.
-                    }
-                    catch
-                    {
-                        // ignore
-                    }
-                }
-
                 ComHelper.Release(_app);
                 _app = null;
             }
+
+            _boundPid = null;
         }).GetAwaiter().GetResult();
     }
 }
